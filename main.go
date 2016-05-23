@@ -5,6 +5,7 @@ import (
 	"bitbucket.com/kmihaylov/afprint/signal"
 	"encoding/gob"
 	"fmt"
+	"math"
 	"math/cmplx"
 	"os"
 	"path/filepath"
@@ -21,6 +22,18 @@ type chunkfft []complex128
 
 type freqdb map[string][]chunkfft
 type printsdb map[string][]chunkid
+
+type fp_settings struct {
+	distance      int
+	weight        int
+	alg_type      string
+	zoomer        float64
+	damper        float64
+	min_freq      int
+	max_freq      int
+	points_ignore []int
+	points_count  int
+}
 
 // Encode via Gob to file
 func Save(path string, object interface{}) error {
@@ -44,13 +57,21 @@ func Load(path string, object interface{}) error {
 	return err
 }
 
-func getRange(freq int) int {
+func getRange(freq int, fps fp_settings) int {
+	step := (fps.max_freq - fps.min_freq) / fps.points_count
+	z := (freq - fps.min_freq) / step
+	if z < 0 {
+		z = 0
+	}
+	if z > fps.points_count-1 {
+		z = fps.points_count - 1
+	}
 	RANGE := []int{40, 80, 120, 180, 300}
 	i := 0
 	for RANGE[i] < freq {
 		i++
 	}
-	return i
+	return z
 }
 
 func ToComplex(x []float32) []complex128 {
@@ -61,22 +82,31 @@ func ToComplex(x []float32) []complex128 {
 	return y
 }
 
-func fingerprint(chunk []complex128) string {
-	const DAMPER = 2
-	const ZOOMER = 30
-	max := []float64{0, 0, 0, 0, 0}
-	maxf := []int{0, 0, 0, 0, 0}
-	for freq := 40; freq < 300; freq++ {
-		//mag := ZOOMER * math.Log(cmplx.Abs(chunk[freq])+1)
-		mag := cmplx.Abs(chunk[freq])
-		index := getRange(freq)
-		if max[index] < mag {
-			max[index] = mag
+func fingerprint(chunk []complex128, fps fp_settings) string {
+	max := make([]int, fps.points_count)
+	maxf := make([]int, fps.points_count)
+
+	for freq := fps.min_freq; freq < fps.max_freq; freq++ {
+		// mag := cmplx.Abs(chunk[freq])
+		mag := fps.zoomer * math.Log(cmplx.Abs(chunk[freq])+1)
+		index := getRange(freq, fps)
+		if max[index] < int(mag) {
+			max[index] = int(mag - math.Mod(mag, fps.damper))
 			maxf[index] = freq
 		}
 	}
-	//return fmt.Sprintf("%v%v%v", max[0]-math.Mod(max[0], DAMPER), max[2]-math.Mod(max[2], DAMPER), max[3]-math.Mod(max[3], DAMPER))
-	return fmt.Sprintf("%v.%v.%v", maxf[1], maxf[2], maxf[3])
+	for _, p := range fps.points_ignore {
+		max[p] = 0
+		maxf[p] = 0
+	}
+
+	//fmt.Printf("%v\n", max)
+	//fmt.Printf("%v\n", maxf)
+	if fps.alg_type == "freq" { // match by frequency
+		return fmt.Sprintf("%v", maxf)
+	} else { // match by magnitude
+		return fmt.Sprintf("%v", max)
+	}
 }
 
 func parsesong(filename string, freqstore *freqdb) error {
@@ -106,21 +136,19 @@ func parsesong(filename string, freqstore *freqdb) error {
 	return nil
 }
 
-func indexsong(filename string, freqstore *freqdb, pdb *printsdb) error {
+func indexsong(filename string, freqstore *freqdb, pdb *printsdb, fps fp_settings) error {
 	frames := (*freqstore)[filename]
 
 	for i := 0; i < len(frames); i++ {
 		c := frames[i]
-		fp := fingerprint(c)
+		fp := fingerprint(c, fps)
 		(*pdb)[fp] = append((*pdb)[fp], chunkid{filename, i})
 	}
 
 	return nil
 }
 
-func match(filename string, pdb *printsdb) int {
-	const CHUNK = 4096
-
+func match(filename string, pdb *printsdb, fps fp_settings) (int, string) {
 	testWav, err := os.Open(filename)
 	checkErr(err)
 	wavReader, err := files.New(testWav)
@@ -129,59 +157,69 @@ func match(filename string, pdb *printsdb) int {
 
 	frames := wavReader.Samples / CHUNK
 
-	score := 0
+	high_score := 0
+	high_name := ""
 
 	scores := make(map[string]int)
 
 	last_matches := make(map[string]chunkid)
 
-	for i := 0; i < frames; i++ {
+	for frame_id := 0; frame_id < frames; frame_id++ {
 		d, err := wavReader.ReadFloats(CHUNK)
 
 		checkErr(err)
 
 		c := ToComplex(d)
 		signal.CTFFT(d, c, len(d), 1)
-		fp := fingerprint(c)
+		fp := fingerprint(c, fps)
 
 		matched := (*pdb)[fp]
+
+		songs_matched := make(map[string]struct{})
+
 		for i := range matched {
 			chunk := matched[i]
-
+			if _, already_matched := songs_matched[chunk.song]; already_matched {
+				//fmt.Printf("skipping  match: %v\n", chunk)
+				continue
+			}
 			// _ = "breakpoint"
 
-			if last_matched := last_matches[chunk.song]; last_matched.seq < chunk.seq && chunk.seq < last_matched.seq+10000 {
+			if last_matched := last_matches[chunk.song]; last_matched.seq < chunk.seq && chunk.seq < last_matched.seq+fps.distance {
 				last_matches[chunk.song] = chunk
-				weight := 250.0 / (chunk.seq - last_matched.seq)
-				fmt.Printf("Accepted match: %v. Score: %v  (%v)\n", chunk, weight, chunk.seq-last_matched.seq)
-				fmt.Printf("fp: %v\n", fp)
+				weight := fps.weight / (chunk.seq - last_matched.seq)
+				//fmt.Printf("%v Accepted match: %v. Score: %v  (%v)\n", frame_id, chunk, weight, chunk.seq-last_matched.seq)
+				//fmt.Printf("fp: %v\n", fp)
 
 				v1, has_score := scores[chunk.song]
 
 				if has_score {
-					score = v1 + weight
+					scores[chunk.song] = v1 + weight
 				} else {
-					score = weight
+					scores[chunk.song] = weight
 				}
-				scores[chunk.song] = score
+				if high_score < scores[chunk.song] {
+					high_score = scores[chunk.song]
+					high_name = chunk.song
+				}
+				songs_matched[chunk.song] = struct{}{}
 			}
 		}
 	}
 
-	fmt.Println("Scores ", scores)
-	return score
+	fmt.Println("Scores ", scores, fps)
+	return high_score, high_name
 }
 
-func tester(files []string, samplename string, freq_store freqdb) {
-	fmt.Println("testing with settings : ...")
-	// build new printstore with random settings
+func tester(files []string, samplename string, freq_store freqdb, fps fp_settings) {
+	// build new printstore with the settings
 	prints_store := make(printsdb)
 	for _, f := range files {
-		fmt.Println("Indexing ", f)
-		indexsong(f, &freq_store, &prints_store)
+		indexsong(f, &freq_store, &prints_store, fps)
 	}
-	//match with random settings§p
-	fmt.Println("Score: ", match(samplename, &prints_store))
+	//match
+	hs, hn := match(samplename, &prints_store, fps)
+	fmt.Printf("Score: %v %v \n", hs, hn)
 }
 
 func main() {
@@ -201,18 +239,37 @@ func main() {
 		parsesong(f, &freq_store)
 	}
 
-	// save the freqdb to gob
-	fmt.Println("saving")
-	// Save("freqdb.gob", freq_store)
-	fmt.Println("saved")
+	distances := []int{1, 5, 10, 100, 500, 1000, 3000}
+	weights := []int{1, 5, 10, 100, 250, 500, 1000}
+	dampers := []float64{1, 2, 3, 4, 5, 6, 10}
+	zoomers := []float64{1, 2, 5, 10, 20, 40, 100}
+	var pointsi [][]int
+	pointsi = append(pointsi, []int{0, 4})
+	pointsi = append(pointsi, []int{1, 4})
+	pointsi = append(pointsi, []int{2, 4})
+	pointsi = append(pointsi, []int{3, 4})
+	pointsi = append(pointsi, []int{0})
+	pointsi = append(pointsi, []int{1})
+	pointsi = append(pointsi, []int{2})
+	pointsi = append(pointsi, []int{3})
+	pointsi = append(pointsi, []int{5})
 
-	// load from gob
-	fmt.Println("loading")
-	//freq_store1 := make(freqdb)
-	//Load("freqdb.gob", freq_store1)
-	fmt.Println("done")
-	tester(files, samplename, freq_store)
-	//tester(files, samplename, freq_store1)
+	fs := []fp_settings{}
+	for _, p := range pointsi {
+		for _, z := range zoomers {
+			for _, ds := range dampers {
+				for _, w := range weights {
+					for _, d := range distances {
+						fs = append(fs, fp_settings{alg_type: "freq", distance: d, weight: w, damper: ds, zoomer: z, min_freq: 40, max_freq: 300, points_ignore: p, points_count: 5})
+						fs = append(fs, fp_settings{alg_type: "mag", distance: d, weight: w, damper: ds, zoomer: z, min_freq: 40, max_freq: 300, points_ignore: p, points_count: 5})
+					}
+				}
+			}
+		}
+	}
+	for i := range fs {
+		tester(files, samplename, freq_store, fs[i])
+	}
 
 }
 
