@@ -3,6 +3,7 @@ package main
 import (
 	"bitbucket.com/kmihaylov/afprint/io"
 	"bitbucket.com/kmihaylov/afprint/signal"
+	"flag"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -114,7 +115,10 @@ func indexsong(filename string, freqstore *freqdb, pdb *printsdb, fps fpSettings
 
 func match(filename string, pdb *printsdb, fps fpSettings) (int, string) {
 	testWav, err := os.Open(filename)
-	checkErr(err)
+	if err != nil {
+		fmt.Println("cannot open", filename)
+		os.Exit(-1)
+	}
 	wavReader, err := files.New(testWav)
 
 	checkErr(err)
@@ -186,15 +190,14 @@ func tester(files []string, samplename string, freqStore freqdb, fps fpSettings)
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintf(os.Stderr, "Usage: tagid <db dir> sample.wav\n")
-		os.Exit(1)
-	}
+	// parse the command line arguments
+	musicfiles := flag.String("db", "music", "path to where the reference samples are stored")
+	samplename := flag.String("sample", "sample.wav", "name of the sample file to be tested")
+
+	flag.Parse()
 	freqStore := make(freqdb)
 
-	samplename := os.Args[2]
-
-	files, _ := filepath.Glob(os.Args[1] + "/*.wav")
+	files, _ := filepath.Glob(*musicfiles + "/*.wav")
 	// build the freq db so that we can explore better algos
 	for _, f := range files {
 		fmt.Println("Parsing ", f)
@@ -230,7 +233,7 @@ func main() {
 		}
 	}
 	for i := range fs {
-		tester(files, samplename, freqStore, fs[i])
+		tester(files, *samplename, freqStore, fs[i])
 	}
 
 }
