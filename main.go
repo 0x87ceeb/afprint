@@ -86,15 +86,15 @@ func parsesong(filename string, freqstore *freqdb) {
 	}
 
 	// read the wav file
-	wavReader, err := files.New(testWav)
+	wavReader, err := files.Open(testWav)
 	checkErr(err)
 
-	frames := wavReader.Samples / chunkSize
+	frames := wavReader.ChunksCount / chunkSize
 
 	chunks := make([]chunkfft, frames)
 
 	for i := 0; i < frames; i++ {
-		d, err := wavReader.ReadFloats(chunkSize)
+		d, err := wavReader.Read(chunkSize)
 		checkErr(err)
 		c := signal.FFT(d)
 		chunks[i] = c
@@ -119,11 +119,11 @@ func match(filename string, pdb *printsdb, fps fpSettings) (int, string) {
 		fmt.Println("cannot open", filename)
 		os.Exit(-1)
 	}
-	wavReader, err := files.New(testWav)
+	wavReader, err := files.Open(testWav)
 
 	checkErr(err)
 
-	frames := wavReader.Samples / chunkSize
+	frames := wavReader.ChunksCount / chunkSize
 
 	highScore := 0
 	highName := ""
@@ -133,7 +133,7 @@ func match(filename string, pdb *printsdb, fps fpSettings) (int, string) {
 	lastMatches := make(map[string]chunkid)
 
 	for frameID := 0; frameID < frames; frameID++ {
-		d, err := wavReader.ReadFloats(chunkSize)
+		d, err := wavReader.Read(chunkSize)
 
 		checkErr(err)
 
@@ -225,7 +225,7 @@ func main() {
 			for _, ds := range dampers {
 				for _, w := range weights {
 					for _, d := range distances {
-						fs = append(fs, fpSettings{algType: "freq", distance: d, weight: w, damper: ds, zoomer: z, minFreq: 40, maxFeq: 300, pointsIgnore: p, pointsCount: 5})
+						//fs = append(fs, fpSettings{algType: "freq", distance: d, weight: w, damper: ds, zoomer: z, minFreq: 40, maxFeq: 300, pointsIgnore: p, pointsCount: 5})
 						fs = append(fs, fpSettings{algType: "mag", distance: d, weight: w, damper: ds, zoomer: z, minFreq: 40, maxFeq: 300, pointsIgnore: p, pointsCount: 5})
 					}
 				}

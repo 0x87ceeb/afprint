@@ -1,3 +1,6 @@
+// implements reading of WAV files (only as floats for the moment)
+// check http://www-mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/WAVE.html for format description
+
 package files
 
 import (
@@ -7,7 +10,6 @@ import (
 	"io"
 	"io/ioutil"
 	"math"
-	"time"
 )
 
 const (
@@ -15,30 +17,26 @@ const (
 	wavFormatIEEEFloat = 3
 )
 
-// Header contains Wav fmt chunk data.
-type Header struct {
-	AudioFormat   uint16
-	NumChannels   uint16
-	SampleRate    uint32
-	ByteRate      uint32
-	BlockAlign    uint16
-	BitsPerSample uint16
+// Header containing Wav fmt chunk data.
+type FormatChunk struct {
+	FormatTag      uint16
+	NumChannels    uint16
+	SamplesPerSec  uint32
+	AvgBytesPerSec uint32
+	BlockAlign     uint16
+	BitsPerSample  uint16
 }
 
-// Wav reads wav files.
-type Wav struct {
-	Header
-	// Samples is the total number of available samples.
-	Samples int
-	// Duration is the estimated duration based on reported samples.
-	Duration time.Duration
-
-	r io.Reader
+// Wav file descriptor
+type WavFile struct {
+	FormatChunk
+	ChunksCount int
+	r           io.Reader
 }
 
-// New reads the WAV header from r.
-func New(r io.Reader) (*Wav, error) {
-	var w Wav
+// Reads the WAV file from r.
+func Open(r io.Reader) (*WavFile, error) {
+	var w WavFile
 	header := make([]byte, 16)
 	if _, err := io.ReadFull(r, header[:12]); err != nil {
 		return nil, err
@@ -64,22 +62,21 @@ func New(r io.Reader) (*Wav, error) {
 			if _, err := io.ReadFull(r, f); err != nil {
 				return nil, err
 			}
-			if err := binary.Read(bytes.NewBuffer(f), binary.LittleEndian, &w.Header); err != nil {
+			if err := binary.Read(bytes.NewBuffer(f), binary.LittleEndian, &w.FormatChunk); err != nil {
 				return nil, err
 			}
-			switch w.AudioFormat {
+			switch w.FormatTag {
 			case wavFormatPCM:
 			case wavFormatIEEEFloat:
 			default:
-				return nil, fmt.Errorf("wav: unknown audio format: %02x", w.AudioFormat)
+				return nil, fmt.Errorf("wav: unknown audio format: %02x", w.FormatTag)
 			}
 			hasFmt = true
 		case "data":
 			if !hasFmt {
-				return nil, fmt.Errorf("wav: unexpected fmt chunk")
+				return nil, fmt.Errorf("wav: unknown chunk format")
 			}
-			w.Samples = int(sz) / int(w.BitsPerSample) * 8
-			w.Duration = time.Duration(w.Samples) * time.Second / time.Duration(w.SampleRate) / time.Duration(w.NumChannels)
+			w.ChunksCount = int(sz) / int(w.BitsPerSample) * 8
 			w.r = io.LimitReader(r, int64(sz))
 			return &w, nil
 		default:
@@ -88,11 +85,12 @@ func New(r io.Reader) (*Wav, error) {
 	}
 }
 
-// ReadSamples returns a [n]T, where T is uint8, int16, or float32, based on the
-// wav data. n is the number of samples to return.
-func (w *Wav) ReadSamples(n int) (interface{}, error) {
+// Reads N chunks returning the data as []float32
+func (w *WavFile) Read(n int) ([]float32, error) {
 	var data interface{}
-	switch w.AudioFormat {
+	var f []float32
+
+	switch w.FormatTag {
 	case wavFormatPCM:
 		switch w.BitsPerSample {
 		case 8:
@@ -107,35 +105,26 @@ func (w *Wav) ReadSamples(n int) (interface{}, error) {
 	default:
 		return nil, fmt.Errorf("wav: unknown audio format")
 	}
+
 	if err := binary.Read(w.r, binary.LittleEndian, data); err != nil {
 		return nil, err
 	}
-	return data, nil
-}
 
-// ReadFloats is like ReadSamples, but it converts any underlying data to a
-// float32.
-func (w *Wav) ReadFloats(n int) ([]float32, error) {
-	d, err := w.ReadSamples(n)
-	if err != nil {
-		return nil, err
-	}
-	var f []float32
-	switch d := d.(type) {
+	switch data := data.(type) {
 	case []uint8:
-		f = make([]float32, len(d))
-		for i, v := range d {
+		f = make([]float32, len(data))
+		for i, v := range data {
 			f[i] = float32(v) / math.MaxUint8
 		}
 	case []int16:
-		f = make([]float32, len(d))
-		for i, v := range d {
+		f = make([]float32, len(data))
+		for i, v := range data {
 			f[i] = (float32(v) - math.MinInt16) / (math.MaxInt16 - math.MinInt16)
 		}
 	case []float32:
-		f = d
+		f = data
 	default:
-		return nil, fmt.Errorf("wav: unknown type: %T", d)
+		return nil, fmt.Errorf("wav: unknown type: %T", data)
 	}
 	return f, nil
 }
