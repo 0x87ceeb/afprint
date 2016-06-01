@@ -35,6 +35,11 @@ type fpSettings struct {
 	pointsCount  int
 }
 
+// simple map to hold total score for how good settings perform
+type settingsResults map[string]int
+
+// returns the index in the print array for the given frequency
+// this allows for experimenting with different frequency bands
 func getRange(freq int, fps fpSettings) int {
 	step := (fps.maxFeq - fps.minFreq) / fps.pointsCount
 	z := (freq - fps.minFreq) / step
@@ -52,12 +57,12 @@ func getRange(freq int, fps fpSettings) int {
 	return z
 }
 
+// fingerprints the songs using either frequency match or magnitude
 func fingerprint(chunk []complex128, fps fpSettings) string {
 	max := make([]int, fps.pointsCount)
 	maxf := make([]int, fps.pointsCount)
 
 	for freq := fps.minFreq; freq < fps.maxFeq; freq++ {
-		// mag := cmplx.Abs(chunk[freq])
 		mag := fps.zoomer * math.Log(cmplx.Abs(chunk[freq])+1)
 		index := getRange(freq, fps)
 		if max[index] < int(mag) {
@@ -70,8 +75,6 @@ func fingerprint(chunk []complex128, fps fpSettings) string {
 		maxf[p] = 0
 	}
 
-	//fmt.Printf("%v\n", max)
-	//fmt.Printf("%v\n", maxf)
 	if fps.algType == "freq" { // match by frequency
 		return fmt.Sprintf("%v", maxf)
 	}
@@ -79,6 +82,7 @@ func fingerprint(chunk []complex128, fps fpSettings) string {
 	return fmt.Sprintf("%v", max)
 }
 
+// reads a wav file in chunks, performing fft on each and stores the result in freqdb
 func parsesong(filename string, freqstore *freqdb) {
 	testWav, err := os.Open(filename)
 	if err != nil {
@@ -103,6 +107,7 @@ func parsesong(filename string, freqstore *freqdb) {
 	(*freqstore)[filename] = chunks
 }
 
+// perfroms a fingerprint operation on the song, using the stored ffts and the particular settings
 func indexsong(filename string, freqstore *freqdb, pdb *printsdb, fps fpSettings) {
 	frames := (*freqstore)[filename]
 
@@ -113,7 +118,8 @@ func indexsong(filename string, freqstore *freqdb, pdb *printsdb, fps fpSettings
 	}
 }
 
-func match(filename string, pdb *printsdb, fps fpSettings) (int, string) {
+// mathes a wav file to a music db. returns a percentage match, the score and the name of the highest match
+func match(filename string, pdb *printsdb, fps fpSettings) (int, int, string) {
 	testWav, err := os.Open(filename)
 	if err != nil {
 		fmt.Println("cannot open", filename)
@@ -132,6 +138,7 @@ func match(filename string, pdb *printsdb, fps fpSettings) (int, string) {
 
 	lastMatches := make(map[string]chunkid)
 
+	// loop through each frame and increase the total score for the matched songs
 	for frameID := 0; frameID < frames; frameID++ {
 		d, err := wavReader.Read(chunkSize)
 
@@ -144,22 +151,25 @@ func match(filename string, pdb *printsdb, fps fpSettings) (int, string) {
 
 		songsMatched := make(map[string]struct{})
 
+		// we usually match more than one chunk. process each
 		for i := range matched {
+			// we will only accept one match per song. this will be the first one in order to allow more matches next
 			chunk := matched[i]
 			if _, alreadyMatched := songsMatched[chunk.song]; alreadyMatched {
-				//fmt.Printf("skipping  match: %v\n", chunk)
 				continue
 			}
 			// _ = "breakpoint"
 
+			// only accept matches in order and with fps.distance away from the last one.
+			// NOTE: a problen with that algorithm is that it puts too much importance on the order;
+			// a wrong match at the end of the song may stop other legitimate matches from being counted
 			if lastMatched := lastMatches[chunk.song]; lastMatched.seq < chunk.seq && chunk.seq < lastMatched.seq+fps.distance {
 				lastMatches[chunk.song] = chunk
 				weight := fps.weight / (chunk.seq - lastMatched.seq)
-				//fmt.Printf("%v Accepted match: %v. Score: %v  (%v)\n", frame_id, chunk, weight, chunk.seq-last_matched.seq)
-				//fmt.Printf("fp: %v\n", fp)
 
 				v1, hasScore := scores[chunk.song]
 
+				// update the score for the song
 				if hasScore {
 					scores[chunk.song] = v1 + weight
 				} else {
@@ -169,30 +179,87 @@ func match(filename string, pdb *printsdb, fps fpSettings) (int, string) {
 					highScore = scores[chunk.song]
 					highName = chunk.song
 				}
+				// don't match the song anymore for that chunk
 				songsMatched[chunk.song] = struct{}{}
 			}
 		}
 	}
+	sum := 0
+	for _, value := range scores {
+		sum += value
+	}
 
-	fmt.Println("Scores ", scores, fps)
-	return highScore, highName
+	if sum == 0 {
+		return 0, 0, ""
+	}
+	return 100 * highScore / sum, highScore, highName
 }
 
-func tester(files []string, samplename string, freqStore freqdb, fps fpSettings) {
-	// build new printstore with the settings
-	printsStore := make(printsdb)
-	for _, f := range files {
-		indexsong(f, &freqStore, &printsStore, fps)
+// utility function to generate differnt settings
+func generateSettings() []fpSettings {
+	distances := []int{1000, 2000}
+	weights := []int{500, 1000}
+	dampers := []float64{2, 3}
+	zoomers := []float64{2, 10}
+
+	var pointsi [][]int
+	pointsi = append(pointsi, []int{4})
+	//pointsi = append(pointsi, []int{0, 1})
+
+	fs := []fpSettings{}
+
+	// generate lots of different settings
+	for _, p := range pointsi {
+		for _, z := range zoomers {
+			for _, ds := range dampers {
+				for _, w := range weights {
+					for _, d := range distances {
+						fs = append(fs, fpSettings{algType: "freq", distance: d, weight: w, damper: ds, zoomer: z, minFreq: 40, maxFeq: 300, pointsIgnore: p, pointsCount: 5})
+						fs = append(fs, fpSettings{algType: "mag", distance: d, weight: w, damper: ds, zoomer: z, minFreq: 40, maxFeq: 300, pointsIgnore: p, pointsCount: 5})
+					}
+				}
+			}
+		}
 	}
-	//match
-	hs, hn := match(samplename, &printsStore, fps)
-	fmt.Printf("Score: %v %v \n", hs, hn)
+
+	return fs
+}
+
+// genarates a string representation (key) for a setting.
+// the key does not have to unique and this allows settings to be explored in groups
+func (fs *fpSettings) repr() string {
+	return fmt.Sprintf("[a-%v,dist-%v,w-%v,damp-%v,z-%v", fs.algType, fs.distance, fs.weight, fs.damper, fs.zoomer)
+}
+
+// utility function to allow for experimenting with differnt settings
+func tester(files []string, samplename string, expectedMatch string, freqStore freqdb, sr settingsResults) {
+	fmt.Println("Testing ", samplename)
+
+	fs := generateSettings()
+
+	for _, fps := range fs {
+		// build new printstore with the settings
+		printsStore := make(printsdb)
+		for _, f := range files {
+			indexsong(f, &freqStore, &printsStore, fps)
+		}
+		//match
+		pc, hs, hn := match(samplename, &printsStore, fps)
+		if hn == expectedMatch && pc > 0 {
+			fmt.Printf("CORRECT Score: %v(%v) %v - %v\n", pc, hs, hn, fps)
+			sr[fps.repr()]++
+		} else {
+			fmt.Printf(":(  %v(%v) %v - %v\n", pc, hs, hn, fps)
+		}
+	}
 }
 
 func main() {
 	// parse the command line arguments
 	musicfiles := flag.String("db", "music", "path to where the reference samples are stored")
 	samplename := flag.String("sample", "sample.wav", "name of the sample file to be tested")
+	// explore diffrent algorithms/settings
+	explore := flag.Bool("explore", false, "run in exploration mode")
 
 	flag.Parse()
 	freqStore := make(freqdb)
@@ -204,38 +271,33 @@ func main() {
 		parsesong(f, &freqStore)
 	}
 
-	distances := []int{1, 5, 10, 100, 500, 1000, 3000}
-	weights := []int{1, 5, 10, 100, 250, 500, 1000}
-	dampers := []float64{1, 2, 3, 4, 5, 6, 10}
-	zoomers := []float64{1, 2, 5, 10, 20, 40, 100}
-	var pointsi [][]int
-	pointsi = append(pointsi, []int{0, 4})
-	pointsi = append(pointsi, []int{1, 4})
-	pointsi = append(pointsi, []int{2, 4})
-	pointsi = append(pointsi, []int{3, 4})
-	pointsi = append(pointsi, []int{0})
-	pointsi = append(pointsi, []int{1})
-	pointsi = append(pointsi, []int{2})
-	pointsi = append(pointsi, []int{3})
-	pointsi = append(pointsi, []int{5})
+	// simple evolutionary testing to get best settings
+	if *explore {
+		// TODO:  store the results in sqlite db for easier analytics
+		sc := make(map[string]int)
+		tester(files, "samples/04.wav", "music/04.wav", freqStore, sc)
+		tester(files, "samples/04_long.wav", "music/04.wav", freqStore, sc)
+		tester(files, "samples/04_short.wav", "music/04.wav", freqStore, sc)
 
-	fs := []fpSettings{}
-	for _, p := range pointsi {
-		for _, z := range zoomers {
-			for _, ds := range dampers {
-				for _, w := range weights {
-					for _, d := range distances {
-						//fs = append(fs, fpSettings{algType: "freq", distance: d, weight: w, damper: ds, zoomer: z, minFreq: 40, maxFeq: 300, pointsIgnore: p, pointsCount: 5})
-						fs = append(fs, fpSettings{algType: "mag", distance: d, weight: w, damper: ds, zoomer: z, minFreq: 40, maxFeq: 300, pointsIgnore: p, pointsCount: 5})
-					}
-				}
-			}
+		tester(files, "samples/01.wav", "music/01.wav", freqStore, sc)
+
+		tester(files, "samples/08.wav", "music/08.wav", freqStore, sc)
+
+		tester(files, "samples/14.wav", "music/14.wav", freqStore, sc)
+		fmt.Printf("Test resultse: %v\n", sc)
+	} else {
+		// running on uknown sample
+		fps := fpSettings{algType: "freq", distance: 1000, weight: 500, damper: 2, zoomer: 4, minFreq: 40, maxFeq: 300, pointsIgnore: []int{0, 4}, pointsCount: 5}
+		// build new printstore with the settings
+		printsStore := make(printsdb)
+		for _, f := range files {
+			indexsong(f, &freqStore, &printsStore, fps)
 		}
-	}
-	for i := range fs {
-		tester(files, *samplename, freqStore, fs[i])
-	}
+		//match
+		pc, hs, hn := match(*samplename, &printsStore, fps)
+		fmt.Printf("Score: %v(%v) %v - %v\n", pc, hs, hn, fps)
 
+	}
 }
 
 func checkErr(err error) {
